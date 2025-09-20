@@ -4,6 +4,12 @@ import datetime
 import pytz # 导入时区库
 import os  # 导入os模块
 from dotenv import load_dotenv  # 导入dotenv库
+import os
+
+# 获取当前文件所在的文件夹的绝对路径
+_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# 构造数据库文件的绝对路径
+DB_PATH = os.path.join(_CURRENT_DIR, 'tasky.db')
 
 # --- 1. 配置 ---
 # 请将这里替换成你的DeepSeek API Key
@@ -20,6 +26,7 @@ if not DEEPSEEK_API_KEY:
     raise ValueError("启动失败：请在 .env 文件中设置您的 DEEPSEEK_API_KEY")
 # 我们为AI准备的“指令说明书” (Prompt Template)
 # 注意: 我们用 {current_time} 和 {user_query} 作为占位符
+# 修正后的PROMPT_TEMPLATE
 PROMPT_TEMPLATE = """
 # 角色
 你是一位顶尖的智能任务解析专家。
@@ -43,7 +50,7 @@ PROMPT_TEMPLATE = """
 用户输入: "明天下午三点提醒我和李总开个重要的会，大概一个半小时，在三号会议室讨论下个季度的规划。"
 你的输出:
 ```json
-{
+{{
   "task_name": "和李总开会",
   "start_time": "2025-09-19T15:00:00",
   "end_time": "2025-09-19T16:30:00",
@@ -51,11 +58,16 @@ PROMPT_TEMPLATE = """
   "priority": "Medium",
   "details": "讨论下个季度的规划。",
   "location": "三号会议室"
-}
+}}
+[正文]
+上下文时间: {current_time}
+用户输入: {user_query}
 """
 
 
-def parse_task(user_query):
+# def parse_task(user_query):
+# 修改后正确的代码
+def parse_task_with_llm(user_query: str):
     """解析用户输入的任务信息"""
     # a. 获取当前时间并格式化 (我们自己搞定时间)
     tz = pytz.timezone('Asia/Shanghai') # 设置为东八区
