@@ -116,3 +116,34 @@ def update_task_status(task_id: int, status: str):
         return False
 
 # ... 你可能有的其他函数也需要同样修改 ...
+
+# 在 database_manager.py 文件末尾添加
+
+def update_task_name(task_id: int, new_name: str):
+    """更新指定任务的名称"""
+    if not new_name: # 防止空名称
+        return False
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            update_sql = "UPDATE tasks SET task_name = ? WHERE id = ?;"
+            cursor.execute(update_sql, (new_name, task_id))
+        print(f"[*] 成功更新任务ID {task_id} 的名称为: {new_name}")
+        return True
+    except Exception as e:
+        print(f"❌ 更新任务ID {task_id} 的名称失败: {e}")
+        return False
+
+def delete_task(task_id: int):
+    """删除指定任务（及其所有子任务）"""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            # 一个更健壮的删除，会把它的子任务也一并删除
+            delete_sql = "DELETE FROM tasks WHERE id = ? OR parent_task_id = ?;"
+            cursor.execute(delete_sql, (task_id, task_id))
+        print(f"[*] 成功删除任务ID {task_id} 及其子任务。")
+        return True
+    except Exception as e:
+        print(f"❌ 删除任务ID {task_id} 失败: {e}")
+        return False
