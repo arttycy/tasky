@@ -147,3 +147,50 @@ def delete_task(task_id: int):
     except Exception as e:
         print(f"❌ 删除任务ID {task_id} 失败: {e}")
         return False
+# database_manager.py 文件末尾
+
+# --- 新增：为“智能排程器”准备的三个新技能 ---
+
+def get_fixed_events(target_date: str):
+    """
+    查询指定日期的、时间已经固定的事件。
+    :param target_date: 日期字符串 "YYYY-MM-DD"
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # SQL查询：选择所有start_time不为空，且日期匹配的行
+        query_sql = "SELECT task_name, start_time, end_time FROM tasks WHERE start_time IS NOT NULL AND DATE(start_time) = ?;"
+        cursor.execute(query_sql, (target_date,))
+        events = cursor.fetchall()
+        
+        # 将查询结果转换为字典列表
+        print(f"[*] 在 {target_date} 找到 {len(events)} 个固定事件。")
+        return [dict(row) for row in events]
+
+def get_flexible_tasks():
+    """查询所有时间未安排的灵活任务"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # SQL查询：选择所有start_time为空，且是主任务的行
+        query_sql = "SELECT id, task_name, duration_minutes, priority FROM tasks WHERE start_time IS NULL AND parent_task_id IS NULL;"
+        cursor.execute(query_sql)
+        tasks = cursor.fetchall()
+
+        print(f"[*] 找到 {len(tasks)} 个需要排程的灵活任务。")
+        return [dict(row) for row in tasks]
+
+def update_task_schedule(task_id: int, start_time: str, end_time: str):
+    """根据排程结果，更新一个任务的开始和结束时间"""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            update_sql = "UPDATE tasks SET start_time = ?, end_time = ? WHERE id = ?;"
+            cursor.execute(update_sql, (start_time, end_time, task_id))
+        return True
+    except Exception as e:
+        print(f"❌ 更新任务ID {task_id} 的日程失败: {e}")
+        return False

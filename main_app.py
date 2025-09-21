@@ -5,6 +5,7 @@ import database_manager
 import task_parser
 import os
 import task_decomposer
+import task_scheduler
 from datetime import datetime
 
 # 获取当前文件所在的文件夹的绝对路径
@@ -50,6 +51,7 @@ def refresh_tasks():
         for task in pending_parent_tasks:
             # 找到该父任务下的 pending 子任务
             pending_children = [ct for ct in child_tasks if ct['parent_task_id'] == task['id'] and ct['status'] == 'pending']
+            child_tasks_of_parent = [c for c in child_tasks if c['parent_task_id'] == task['id']]
 
             # 三列布局：任务主体 / 完成勾选 / 优先级
             col1, col2, col3 = st.columns([6, 1, 2])
@@ -67,14 +69,10 @@ def refresh_tasks():
                     info_parts.append(f"⏳ 预计耗时: {task.get('duration_minutes')} 分钟")
                 if task.get('location'):
                     info_parts.append(f"📍 {task.get('location')}")
-
                 details_string = " | ".join(info_parts)
 
                 # 任务名称 + 详情（放在 col1 内）
-                label_markdown = f"""
-**{task.get('task_name', '未命名任务')}**  
-<small style="color: grey;">{details_string}</small>
-"""
+                label_markdown = f"""**{task.get('task_name', '未命名任务')}**  <small style="color: grey;">{details_string}</small>"""
                 st.markdown(label_markdown, unsafe_allow_html=True)
 
                 # 详情展开
@@ -92,6 +90,23 @@ def refresh_tasks():
                     args=(task['id'], 'completed' if task.get('status') == 'pending' else 'pending'),
                     label_visibility="collapsed"
                 )
+            with col2:
+                # --- ↓↓↓ 为“智能分解”按钮注入真实功能 ↓↓↓ ---
+                if task['duration_minutes'] and task['duration_minutes'] > 600 and not child_tasks_of_parent:
+                    if st.button("智能分解", key=f"decompose_{task['id']}"):
+                        with st.spinner("🧠 正在调用AI大脑进行智能分解..."):
+                            # 1. 调用任务分解器AI大脑
+                            sub_tasks_list = task_decomposer.decompose_task(task['task_name'])
+                            
+                            # 2. 如果成功，将子任务列表存入数据库
+                            if sub_tasks_list:
+                                database_manager.add_subtasks(task['id'], sub_tasks_list)
+                                st.success("任务分解成功！")
+                                # 3. 强制刷新页面，以立刻显示出新的子任务
+                                st.rerun()
+                            else:
+                                st.error("抱歉，AI未能成功分解任务。")
+                # ------------------------------------
 
             with col3:
                 st.info(f"优先级: {task.get('priority', 'Low')}")
@@ -112,7 +127,7 @@ def refresh_tasks():
                     st.markdown(f"↳ **{child.get('task_name', '未命名子任务')}**")
             st.divider()
 
-    # --- 已完成任务 区 ---
+    # --- 已完成任务区 ---
     completed_tasks = [t for t in all_tasks if t['status'] == 'completed']
     if completed_tasks:
         with st.expander(f"✅ 已完成的任务 ({len(completed_tasks)})", expanded=True):
@@ -181,14 +196,52 @@ with st.form("new_task_form", clear_on_submit=True):
                     st.error("抱歉，任务解析失败，请换一种方式描述。")
 
 
+
 # --- 全局智能功能区 ---
 st.sidebar.title("智能规划中心")
 if st.sidebar.button("🤖 一键智能排程"):
     with st.spinner("🗓️ 正在为您规划最优日程..."):
-        # 这里未来会调用 task_scheduler
-        st.success("日程已智能优化！（功能待实现）")
 
+        # --- ↓↓↓ 这是新增的核心逻辑 ↓↓↓ ---
+        # 1. 定义排程的目标日期（这里我们先简单设为今天）
+        target_date = datetime.now().strftime('%Y-%m-%d')
+
+        # 2. 从数据库获取所需信息
+        print(f"[*] 开始为日期 {target_date} 进行智能排程...")
+        fixed_events = database_manager.get_fixed_events(target_date)
+        flexible_tasks = database_manager.get_flexible_tasks()
+
+        if not flexible_tasks:
+            st.sidebar.warning("没有需要排程的灵活任务。")
+        else:
+            # 3. 调用智能排程器AI大脑
+            # 我们需要从灵活任务中提取特定字段给AI
+            tasks_for_ai = [
+                {"task_name": t["task_name"], "duration_minutes": t["duration_minutes"], "priority": t["priority"]}
+                for t in flexible_tasks
+            ]
+            schedule_result = task_scheduler.schedule_tasks(tasks_for_ai, fixed_events, target_date)
+
+            # 4. 如果成功，将排程结果写回数据库
+            if schedule_result:
+                task_name_to_id_map = {t["task_name"]: t["id"] for t in flexible_tasks}
+
+                success_count = 0
+                for scheduled_item in schedule_result:
+                    task_name = scheduled_item.get("task_name")
+                    if task_name in task_name_to_id_map:
+                        task_id = task_name_to_id_map[task_name]
+                        start_time = scheduled_item.get("start_time")
+                        end_time = scheduled_item.get("end_time")
+
+                        if database_manager.update_task_schedule(task_id, start_time, end_time):
+                            success_count += 1
+
+                st.sidebar.success(f"成功优化了 {success_count} 个任务的日程！")
+                st.rerun() # 刷新主页面以显示新日程
+            else:
+                st.sidebar.error("抱歉，AI排程失败。")
+        # --- 核心逻辑结束 ---
 
 # --- 刷新并显示任务列表 ---
 refresh_tasks()
-
