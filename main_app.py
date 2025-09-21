@@ -1,247 +1,245 @@
-# main_app.py
+# main_app.py (V1.5 - 修正了表单内的按钮错误)
 
 import streamlit as st
 import database_manager
 import task_parser
-import os
 import task_decomposer
 import task_scheduler
 from datetime import datetime
+import os
 
-# 获取当前文件所在的文件夹的绝对路径
-_CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-# 构造数据库文件的绝对路径
-DB_PATH = os.path.join(_CURRENT_DIR, 'tasky.db')
-
-# 后面我们还会导入 task_decomposer 和 task_scheduler
-
-# --- 新增：确保数据库和表在应用启动时已准备就绪 ---
-database_manager.init_db()
-
-# --- 页面基础配置 ---
+# --- 1. 页面基础配置 (必须是第一个st命令) ---
 st.set_page_config(
     page_title="Tasky 智能任务助手",
     page_icon="📝",
     layout="wide"
 )
 
-# --- 核心功能函数 ---
-def refresh_tasks():
-    """
-    从数据库获取任务，智能地分为“待办”和“已完成”两部分进行显示，
-    并保留父子任务的层级结构。修正了列布局和缩进问题，确保所有渲染
-    都在对应的 with colX: 块内。
-    """
-    all_tasks = database_manager.get_all_tasks()
+# --- 2. 注入自定义CSS来优化间距 ---
+st.markdown("""
+    <style>
+    /* 减小checkbox和下方元素的间距 */
+    div[data-testid="stVerticalBlock"] div[data-testid="stCheckbox"] {
+        padding-bottom: 0px;
+        margin-bottom: -10px;
+    }
+    /* 减小按钮的内边距和字体大小，让图标按钮更精致 */
+    div[data-testid="stHorizontalBlock"] button {
+        padding: 0.15rem 0.4rem; /* 调整垂直和水平内边距 */
+        font-size: 0.75rem;      /* 减小字体大小以缩小图标 */
+        line-height: 1.3;        /* 调整行高以优化垂直对齐 */
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    # 组织任务
-    tasks_by_id = {task['id']: task for task in all_tasks}
-    parent_tasks = [task for task in all_tasks if task['parent_task_id'] is None]
-    child_tasks = [task for task in all_tasks if task['parent_task_id'] is not None]
+# --- 3. 初始化数据库和会话状态 ---
+database_manager.init_db()
 
-    # --- 待办任务 区 ---
-    st.header("🎯 待办任务")
+if 'editing_task_id' not in st.session_state:
+    st.session_state.editing_task_id = None
+if 'confirming_delete_id' not in st.session_state:
+    st.session_state.confirming_delete_id = None
 
-    pending_parent_tasks = [pt for pt in parent_tasks if pt['status'] == 'pending']
-    pending_children_exist = any(ct['status'] == 'pending' for ct in child_tasks)
+# --- 4. 辅助函数 (处理交互逻辑) ---
 
-    if not pending_parent_tasks and not pending_children_exist:
-        st.success("所有任务都已完成！🎉")
-    else:
-        for task in pending_parent_tasks:
-            # 找到该父任务下的 pending 子任务
-            pending_children = [ct for ct in child_tasks if ct['parent_task_id'] == task['id'] and ct['status'] == 'pending']
-            child_tasks_of_parent = [c for c in child_tasks if c['parent_task_id'] == task['id']]
+def handle_delete(task_id):
+    """删除按钮 on_click 的回调函数"""
+    database_manager.delete_task(task_id)
+    st.session_state.confirming_delete_id = None
 
-            # 三列布局：任务主体 / 完成勾选 / 优先级
-            col1, col2, col3 = st.columns([6, 1, 2])
-            with col1:
-                # 组装详情字符串
-                info_parts = []
-                if task.get('start_time'):
-                    try:
-                        dt_object = datetime.fromisoformat(task['start_time'])
-                        friendly_time = dt_object.strftime('%m月%d日 %H:%M')
-                        info_parts.append(f"⏰ {friendly_time}")
-                    except (ValueError, TypeError):
-                        pass
-                if task.get('duration_minutes'):
-                    info_parts.append(f"⏳ 预计耗时: {task.get('duration_minutes')} 分钟")
-                if task.get('location'):
-                    info_parts.append(f"📍 {task.get('location')}")
-                details_string = " | ".join(info_parts)
 
-                # 任务名称 + 详情（放在 col1 内）
-                label_markdown = f"""**{task.get('task_name', '未命名任务')}**  <small style="color: grey;">{details_string}</small>"""
-                st.markdown(label_markdown, unsafe_allow_html=True)
+# --- 5. 核心渲染函数 ---
 
-                # 详情展开
-                if task.get('details'):
-                    with st.expander("查看详情..."):
-                        st.markdown(f"> {task.get('details')}")
+def display_task_item(task, all_child_tasks):
+    """一个通用的函数，用来显示任何一个任务项（无论父子）"""
+    task_id = task['id']
+    is_parent = task['parent_task_id'] is None
+    is_completed = (task['status'] == 'completed')
 
-            with col2:
-                # 把完成 checkbox 放在中间列（隐藏 label）
-                st.checkbox(
-                    label="",
-                    value=(task.get('status') == 'completed'),
-                    key=f"check_parent_{task['id']}",
-                    on_change=database_manager.update_task_status,
-                    args=(task['id'], 'completed' if task.get('status') == 'pending' else 'pending'),
-                    label_visibility="collapsed"
-                )
-            with col2:
-                # --- ↓↓↓ 为“智能分解”按钮注入真实功能 ↓↓↓ ---
-                if task['duration_minutes'] and task['duration_minutes'] > 600 and not child_tasks_of_parent:
-                    if st.button("智能分解", key=f"decompose_{task['id']}"):
-                        with st.spinner("🧠 正在调用AI大脑进行智能分解..."):
-                            # 1. 调用任务分解器AI大脑
-                            sub_tasks_list = task_decomposer.decompose_task(task['task_name'])
-                            
-                            # 2. 如果成功，将子任务列表存入数据库
-                            if sub_tasks_list:
-                                database_manager.add_subtasks(task['id'], sub_tasks_list)
-                                st.success("任务分解成功！")
-                                # 3. 强制刷新页面，以立刻显示出新的子任务
+    # --- A. 编辑模式 ---
+    if st.session_state.editing_task_id == task_id:
+        with st.form(key=f"edit_form_{task_id}"):
+            st.markdown(f"**正在编辑: {task['task_name']}**")
+            new_name = st.text_input("任务名称", value=task['task_name'])
+            new_details = st.text_area("任务详情", value=task.get('details', ''))
+            
+            # 表单的提交和取消按钮
+            col_save, col_cancel = st.columns(2)
+            with col_save:
+                # 定义保存按钮
+                save_button_pressed = st.form_submit_button("✔️ 保存", use_container_width=True)
+            with col_cancel:
+                 # 将取消按钮也定义为提交按钮
+                 cancel_button_pressed = st.form_submit_button("✖️ 取消", use_container_width=True)
+
+        # 在表单外部处理逻辑
+        if save_button_pressed:
+            database_manager.update_task_name(task_id, new_name)
+            database_manager.update_task_details(task_id, new_details)
+            st.session_state.editing_task_id = None
+            st.rerun()
+        
+        if cancel_button_pressed:
+            st.session_state.editing_task_id = None
+            st.rerun()
+        return
+
+    # --- B. 删除确认模式 ---
+    if st.session_state.confirming_delete_id == task_id:
+        st.warning(f"确定要删除任务 '{task['task_name']}' 吗？此操作不可撤销！")
+        col_confirm, col_cancel_del = st.columns(2)
+        with col_confirm:
+            st.button("确认删除", key=f"confirm_delete_{task_id}", on_click=handle_delete, args=(task_id,), use_container_width=True)
+        with col_cancel_del:
+            if st.button("取消", key=f"cancel_delete_{task_id}", use_container_width=True):
+                st.session_state.confirming_delete_id = None
+                st.rerun()
+        return
+
+    # --- C. 正常显示模式 ---
+    col1, col2 = st.columns([0.85, 0.15])
+    with col1:
+        prefix = "" if is_parent else "↳ "
+        
+        if is_completed:
+            label_text = f"~~_{prefix}{task['task_name']}_~~"
+        else:
+            label_text = f"**{prefix}{task['task_name']}**" if is_parent else f"{prefix}__{task['task_name']}__"
+
+        st.checkbox(
+            label=label_text,
+            value=is_completed,
+            key=f"check_{task_id}",
+            on_change=database_manager.update_task_status,
+            args=(task_id, 'pending' if is_completed else 'completed')
+        )
+        
+        if is_parent:
+            info_parts = []
+            if task.get('start_time'):
+                try:
+                    dt = datetime.fromisoformat(task['start_time'])
+                    info_parts.append(f"⏰ {dt.strftime('%m月%d日 %H:%M')}")
+                except (ValueError, TypeError): pass
+            if task.get('duration_minutes'):
+                info_parts.append(f"⏳ {task.get('duration_minutes')} 分钟")
+            if task.get('location'):
+                info_parts.append(f"📍 {task.get('location')}")
+            if info_parts:
+                st.caption(" | ".join(info_parts))
+            if task.get('details'):
+                with st.expander("查看详情..."):
+                    st.markdown(f"> {task.get('details')}")
+
+    with col2:
+        if not is_completed: # 只为待办任务显示按钮
+            btn_cols = st.columns(3)
+            with btn_cols[0]:
+                if st.button("✏️", key=f"edit_{task_id}", help="编辑"):
+                    st.session_state.editing_task_id = task_id
+                    st.rerun()
+            with btn_cols[1]:
+                if st.button("🗑️", key=f"delete_{task_id}", help="删除"):
+                    st.session_state.confirming_delete_id = task_id
+                    st.rerun()
+            with btn_cols[2]:
+                 task_children = [c for c in all_child_tasks if c['parent_task_id'] == task_id]
+                 if is_parent and task['duration_minutes'] and task['duration_minutes'] > 90 and not task_children:
+                    if st.button("🧬", key=f"decompose_{task_id}", help="智能分解"):
+                        with st.spinner("🧠 ..."):
+                            sub_tasks = task_decomposer.decompose_task(task['task_name'])
+                            if sub_tasks:
+                                database_manager.add_subtasks(task_id, sub_tasks)
                                 st.rerun()
                             else:
-                                st.error("抱歉，AI未能成功分解任务。")
-                # ------------------------------------
+                                st.error("分解失败")
 
-            with col3:
-                st.info(f"优先级: {task.get('priority', 'Low')}")
 
-            # 显示 pending 子任务（缩进显示）
+def refresh_tasks():
+    all_tasks = database_manager.get_all_tasks()
+    tasks_by_id = {task['id']: task for task in all_tasks}
+    parent_tasks = [t for t in all_tasks if t['parent_task_id'] is None]
+    child_tasks = [t for t in all_tasks if t['parent_task_id'] is not None]
+
+    st.header("🎯 待办任务")
+    pending_tasks = [t for t in all_tasks if t['status'] == 'pending']
+    if not pending_tasks:
+        st.success("所有任务都已完成！🎉")
+    else:
+        pending_parent_tasks = [pt for pt in parent_tasks if pt['status'] == 'pending']
+        for task in pending_parent_tasks:
+            display_task_item(task, child_tasks)
+            pending_children = [ct for ct in child_tasks if ct['parent_task_id'] == task['id'] and ct['status'] == 'pending']
             for child in pending_children:
-                c1, c2 = st.columns([0.04, 0.96])
-                with c1:
-                    st.checkbox(
-                        label="",
-                        value=(child.get('status') == 'completed'),
-                        key=f"check_child_{child['id']}",
-                        on_change=database_manager.update_task_status,
-                        args=(child['id'], 'completed' if child.get('status') == 'pending' else 'pending'),
-                        label_visibility="collapsed"
-                    )
-                with c2:
-                    st.markdown(f"↳ **{child.get('task_name', '未命名子任务')}**")
+                display_task_item(child, child_tasks)
             st.divider()
 
-    # --- 已完成任务区 ---
+    st.header("✅ 已完成的任务")
     completed_tasks = [t for t in all_tasks if t['status'] == 'completed']
     if completed_tasks:
-        with st.expander(f"✅ 已完成的任务 ({len(completed_tasks)})", expanded=True):
-            # 需要在已完成区显示的父任务集合：
-            parent_ids_in_completed = set(
-                [t['id'] for t in parent_tasks if t['status'] == 'completed'] +
-                [t['parent_task_id'] for t in child_tasks if t['status'] == 'completed']
-            )
+        parent_ids_in_completed = sorted(list(set(
+            [t['id'] for t in parent_tasks if t['status'] == 'completed'] +
+            [t['parent_task_id'] for t in child_tasks if t['status'] == 'completed']
+        )))
 
-            for parent_id in sorted(list(parent_ids_in_completed)):
-                parent_task = tasks_by_id.get(parent_id)
-                if not parent_task:
-                    continue
+        for parent_id in parent_ids_in_completed:
+            parent_task = tasks_by_id.get(parent_id)
+            if not parent_task: continue
 
-                # 父任务的一行（父任务可能本身是 completed，也可能只是有已完成子项）
-                p_col1, p_col2 = st.columns([9, 1])
-                with p_col1:
-                    if parent_task.get('status') == 'completed':
-                        st.markdown(f"~~_{parent_task.get('task_name', '未命名任务')}_~~")
-                    else:
-                        st.markdown(f"**{parent_task.get('task_name', '未命名任务')}** (有已完成子项)")
+            if parent_task['status'] == 'pending':
+                st.markdown(f"**{parent_task['task_name']}** (有已完成子项)")
+            else:
+                display_task_item(parent_task, child_tasks)
+            
+            completed_children = [ct for ct in child_tasks if ct['parent_task_id'] == parent_id and ct['status'] == 'completed']
+            for child in completed_children:
+                display_task_item(child, child_tasks)
+            st.divider()
+    else:
+        st.info("还没有已完成的任务。")
 
-                with p_col2:
-                    st.checkbox(
-                        label="",
-                        value=(parent_task.get('status') == 'completed'),
-                        key=f"check_completed_parent_{parent_task['id']}",
-                        on_change=database_manager.update_task_status,
-                        args=(parent_task['id'], 'pending' if parent_task.get('status') == 'completed' else 'completed'),
-                        label_visibility="collapsed"
-                    )
 
-                # 显示该父任务下所有 completed 的子任务
-                completed_children = [ct for ct in child_tasks if ct['parent_task_id'] == parent_id and ct['status'] == 'completed']
-                for child in completed_children:
-                    c1, c2 = st.columns([0.04, 0.96])
-                    with c1:
-                        st.checkbox(
-                            label="",
-                            value=True,
-                            key=f"check_completed_child_{child['id']}",
-                            on_change=database_manager.update_task_status,
-                            args=(child['id'], 'pending'),
-                            label_visibility="collapsed"
-                        )
-                    with c2:
-                        st.markdown(f"↳ ~~_{child.get('task_name', '未命名子任务')}_~~")
-            # end for parent_id
-
-# --- 主界面 ---
+# --- 6. 主界面 ---
 st.title("📝 Tasky - 你的智能任务助手")
 st.markdown("你好！有什么新任务吗？请在下面输入，Tasky会智能解析并为你安排。")
 
-# 任务输入区
 with st.form("new_task_form", clear_on_submit=True):
     new_task_input = st.text_input("✨ 在这里输入你的新任务", placeholder="例如：明天下午三点和李总开会，讨论Q4规划")
     submitted = st.form_submit_button("添加任务")
-
     if submitted and new_task_input:
         with st.spinner("🧠 正在调用AI大脑解析任务..."):
-                parsed_json = task_parser.parse_task_with_llm(new_task_input)
-                if parsed_json:
-                    database_manager.add_task_from_dify(parsed_json)
-                    st.success("任务解析成功！")
-                else:
-                    st.error("抱歉，任务解析失败，请换一种方式描述。")
+            parsed_json = task_parser.parse_task_with_llm(new_task_input)
+            if parsed_json:
+                database_manager.add_task_from_dify(parsed_json)
+                st.rerun()
+            else:
+                st.error("抱歉，任务解析失败，请换一种方式描述。")
 
-
-
-# --- 全局智能功能区 ---
 st.sidebar.title("智能规划中心")
 if st.sidebar.button("🤖 一键智能排程"):
-    with st.spinner("🗓️ 正在为您规划最优日程..."):
-
-        # --- ↓↓↓ 这是新增的核心逻辑 ↓↓↓ ---
-        # 1. 定义排程的目标日期（这里我们先简单设为今天）
-        target_date = datetime.now().strftime('%Y-%m-%d')
-
-        # 2. 从数据库获取所需信息
-        print(f"[*] 开始为日期 {target_date} 进行智能排程...")
+    target_date = datetime.now().strftime('%Y-%m-%d')
+    with st.spinner(f"🗓️ 正在为您规划 {target_date} 的日程..."):
         fixed_events = database_manager.get_fixed_events(target_date)
         flexible_tasks = database_manager.get_flexible_tasks()
-
         if not flexible_tasks:
             st.sidebar.warning("没有需要排程的灵活任务。")
         else:
-            # 3. 调用智能排程器AI大脑
-            # 我们需要从灵活任务中提取特定字段给AI
-            tasks_for_ai = [
-                {"task_name": t["task_name"], "duration_minutes": t["duration_minutes"], "priority": t["priority"]}
-                for t in flexible_tasks
-            ]
+            tasks_for_ai = [{"task_name": t["task_name"], "duration_minutes": t["duration_minutes"], "priority": t["priority"]} for t in flexible_tasks]
             schedule_result = task_scheduler.schedule_tasks(tasks_for_ai, fixed_events, target_date)
-
-            # 4. 如果成功，将排程结果写回数据库
             if schedule_result:
                 task_name_to_id_map = {t["task_name"]: t["id"] for t in flexible_tasks}
-
                 success_count = 0
-                for scheduled_item in schedule_result:
-                    task_name = scheduled_item.get("task_name")
-                    if task_name in task_name_to_id_map:
-                        task_id = task_name_to_id_map[task_name]
-                        start_time = scheduled_item.get("start_time")
-                        end_time = scheduled_item.get("end_time")
-
-                        if database_manager.update_task_schedule(task_id, start_time, end_time):
+                for item in schedule_result:
+                    name = item.get("task_name")
+                    if name in task_name_to_id_map:
+                        task_id = task_name_to_id_map[name]
+                        if database_manager.update_task_schedule(task_id, item.get("start_time"), item.get("end_time")):
                             success_count += 1
-
                 st.sidebar.success(f"成功优化了 {success_count} 个任务的日程！")
-                st.rerun() # 刷新主页面以显示新日程
+                st.rerun()
             else:
                 st.sidebar.error("抱歉，AI排程失败。")
-        # --- 核心逻辑结束 ---
 
-# --- 刷新并显示任务列表 ---
+# --- 7. 渲染主函数 ---
 refresh_tasks()
+
